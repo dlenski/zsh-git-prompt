@@ -7,59 +7,60 @@ prehash = ':'
 from subprocess import Popen, PIPE
 
 import sys
-gitsym = Popen(['git', 'symbolic-ref', 'HEAD'], stdout=PIPE, stderr=PIPE)
-branch, error = gitsym.communicate()
 
-error_string = error.decode('utf-8')
+gitstatus = Popen(['git', 'status', '--porcelain=v2', '-b'], stdout=PIPE, stderr=PIPE, universal_newlines=True)
+stdout, error = gitstatus.communicate()
 
-if 'fatal: Not a git repository' in error_string:
+if gitstatus.returncode != 0 or 'fatal' in error:
 	sys.exit(0)
 
-branch = branch.decode("utf-8").strip()[11:]
+stdout = stdout.splitlines()
 
-res, err = Popen(['git','diff','--name-status'], stdout=PIPE, stderr=PIPE).communicate()
-err_string = err.decode('utf-8')
-if 'fatal' in err_string:
-	sys.exit(0)
-changed_files = [namestat[0] for namestat in res.decode("utf-8").splitlines()]
-staged_files = [namestat[0] for namestat in Popen(['git','diff', '--staged','--name-status'], stdout=PIPE).communicate()[0].splitlines()]
-nb_changed = len(changed_files) - changed_files.count('U')
-nb_U = staged_files.count('U')
-nb_staged = len(staged_files) - nb_U
-staged = str(nb_staged)
-conflicts = str(nb_U)
-changed = str(nb_changed)
-nb_untracked = len([0 for status in Popen(['git','status','--porcelain',],stdout=PIPE).communicate()[0].decode("utf-8").splitlines() if status.startswith('??')])
-untracked = str(nb_untracked)
+in_header = True
+header = {}
+changed_files = set()
+staged_files = set()
+untracked_files = set()
+conflict_files = set()
 
-ahead, behind = 0,0
+for line in stdout:
+	if not line.startswith('#'):
+		in_header = False
+	if in_header:
+		_, k, v = line.split(maxsplit=2)
+		header[k] = v
+	elif line.startswith(('1', '2')):
+		if line[0] == '1':    # "normal" change
+			bits = line.split(maxsplit=8)
+			st, path = bits[1], bits[8]
+		elif line[0] == '2':  # rename/move
+			bits = line.split(maxsplit=9)
+			st, (path, new_path) = bits[1], bits[9].split('\t', 1)
 
-if not branch: # not on any branch
-	branch = prehash + Popen(['git','rev-parse','--short','HEAD'], stdout=PIPE).communicate()[0].decode("utf-8")[:-1]
-else:
-	remote_name = Popen(['git','config','branch.%s.remote' % branch], stdout=PIPE).communicate()[0].decode("utf-8").strip()
-	if remote_name:
-		merge_name = Popen(['git','config','branch.%s.merge' % branch], stdout=PIPE).communicate()[0].decode("utf-8").strip()
-		if remote_name == '.': # local
-			remote_ref = merge_name
-		else:
-			remote_ref = 'refs/remotes/%s/%s' % (remote_name, merge_name[11:])
-		revgit = Popen(['git', 'rev-list', '--left-right', '%s...HEAD' % remote_ref],stdout=PIPE, stderr=PIPE)
-		revlist = revgit.communicate()[0]
-		if revgit.poll(): # fallback to local
-			revlist = Popen(['git', 'rev-list', '--left-right', '%s...HEAD' % merge_name],stdout=PIPE, stderr=PIPE).communicate()[0]
-		behead = revlist.decode("utf-8").splitlines()
-		ahead = len([x for x in behead if x[0]=='>'])
-		behind = len(behead) - ahead
+		if st[0] != '.':
+			staged_files.add(path)
+		if st[1] != '.':
+			changed_files.add(path)
+	elif line.startswith('u'):    # unmerged(conflict)
+		bits = line.split(maxsplit=10)
+		path = bits[10]
+		conflict_files.add(path)
+	elif line.startswith('?'):    # untracked file
+		bits = line.split(maxsplit=1)
+		path = bits[1]
+		untracked_files.add(path)
 
-out = ' '.join([
+branch = header.get('branch.head')
+if branch in (None, '(detached)'):
+	branch = prehash + header.get('branch.oid')[:8]
+ahead, behind = (abs(int(x)) for x in header.get('branch.ab', '0 0').split(maxsplit=1))
+
+print('%s %s %s %d %d %d %d' % (
 	branch,
-	str(ahead),
-	str(behind),
-	staged,
-	conflicts,
-	changed,
-	untracked,
-	])
-print(out, end='')
-
+	ahead,
+	behind,
+	len(staged_files),
+	len(conflict_files),
+	len(changed_files),
+	len(untracked_files),
+	))
